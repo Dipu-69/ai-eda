@@ -10,7 +10,7 @@ import pandas as pd
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
 
 # Optional EDA provider
@@ -18,7 +18,7 @@ EDA_PROVIDER = os.getenv("EDA_PROVIDER", "").lower()  # "ydata" to enable profil
 STATIC_DIR = Path("static")
 (PROFILE_DIR := STATIC_DIR / "profiles").mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="AI EDA API", version="1.0.0")
+app = FastAPI(title="AI EDA API", version="1.1.0")
 
 # CORS
 app.add_middleware(
@@ -58,16 +58,24 @@ class AnalyzeResponse(BaseModel):
     preview_rows: List[Dict[str, Any]]
     profile_url: Optional[str] = None
 
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse(url="/docs")
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return Response(status_code=204)
+
 def read_dataframe(file: UploadFile) -> pd.DataFrame:
-    name = file.filename or "upload"
+    name = (file.filename or "upload").lower()
     content = file.file.read()
-    if content is None or len(content) == 0:
+    if not content:
         raise HTTPException(400, "Empty file")
     try:
-        if name.lower().endswith((".xlsx", ".xls")):
+        if name.endswith((".xlsx", ".xls")):
             return pd.read_excel(io.BytesIO(content))
         else:
-            # Robust CSV read
+            # Robust CSV read with encoding fallback
             try:
                 return pd.read_csv(io.BytesIO(content))
             except Exception:
@@ -231,8 +239,8 @@ def generate_insights(df: pd.DataFrame, summary: Dict[str, Any], charts: Dict[st
         ser = df[numerics[0]]
         mask = t.notna() & ser.notna()
         if mask.sum() > 5:
-            # Correlation with time index
-            idx = (t[mask].view("i8") - t[mask].view("i8").min()) / 1e9
+            t_idx = t[mask].astype("int64")  # ns
+            idx = (t_idx - t_idx.min()) / 1e9
             corr = np.corrcoef(idx, ser[mask])[0, 1]
             if abs(corr) > 0.2:
                 sign = "increasing" if corr > 0 else "decreasing"
@@ -253,13 +261,29 @@ def generate_profile(df: pd.DataFrame, analysis_id: str) -> Optional[str]:
     except Exception:
         return None
 
+# ReportLab-only PDF (no matplotlib)
+def _color_from_corr(val: float):
+    # Map [-1, 0, 1] -> [blue, white, red]
+    from reportlab.lib.colors import Color
+    v = max(-1.0, min(1.0, float(val)))
+    if v >= 0:
+        # white -> red
+        r = 1.0
+        g = 1.0 - 0.6 * v
+        b = 1.0 - 0.6 * v
+    else:
+        # blue -> white
+        v = abs(v)
+        r = 1.0 - 0.6 * v
+        g = 1.0 - 0.6 * v
+        b = 1.0
+    return Color(r, g, b)
+
 def build_pdf(analysis: Dict[str, Any]) -> bytes:
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas
     from reportlab.lib.units import cm
-    from reportlab.lib.utils import ImageReader
-    import io
-    import numpy as np
+    from reportlab.lib.colors import black, HexColor
 
     buff = io.BytesIO()
     c = canvas.Canvas(buff, pagesize=A4)
@@ -269,7 +293,10 @@ def build_pdf(analysis: Dict[str, Any]) -> bytes:
     c.setFont("Helvetica-Bold", 16)
     c.drawString(2*cm, height-2*cm, "AI-Powered Data Analysis Report")
     c.setFont("Helvetica", 10)
-    c.drawString(2*cm, height-2.6*cm, f"Analysis ID: {analysis['analysis_id']}  |  Rows: {analysis['summary']['rows']}  |  Columns: {analysis['summary']['columns']}")
+    c.drawString(
+        2*cm, height-2.6*cm,
+        f"Analysis ID: {analysis['analysis_id']} | Rows: {analysis['summary']['rows']} | Columns: {analysis['summary']['columns']}"
+    )
 
     # Insights
     y = height - 3.4*cm
@@ -280,112 +307,62 @@ def build_pdf(analysis: Dict[str, Any]) -> bytes:
     for ins in analysis["insights"][:8]:
         c.drawString(2.2*cm, y, f"- {ins}")
         y -= 0.5*cm
-        if y < 3.5*cm:
+        if y < 3.8*cm:
             c.showPage(); y = height - 3*cm
+            c.setFont("Helvetica", 10)
 
     charts = analysis.get("charts", {})
 
-    # Try matplotlib; if not available, skip images (no crash)
-    try:
-        import matplotlib.pyplot as plt
-        ok_matplotlib = True
-    except Exception as e:
-        ok_matplotlib = False
-        err = str(e)
-
-    if ok_matplotlib:
-        # Histogram
-        if charts.get("histograms"):
-            h = charts["histograms"][0]
-            try:
-                import numpy as _np
-                plt.figure(figsize=(3.2, 2.2))
-                bins = _np.array(h["bins"]); counts = _np.array(h["counts"])
-                plt.bar((bins[:-1] + bins[1:]) / 2, counts, width=(bins[1]-bins[0])*0.8)
-                plt.title(f"Histogram - {h['column']}")
-                plt.tight_layout()
-                img = io.BytesIO(); plt.savefig(img, format="png", dpi=150); plt.close(); img.seek(0)
-                c.drawImage(ImageReader(img), 2*cm, 2*cm, width=7*cm, height=5*cm, preserveAspectRatio=True)
-            except Exception:
-                pass
-
-        # Heatmap
-        if charts.get("heatmap"):
-            try:
-                hm = charts["heatmap"]
-                plt.figure(figsize=(3.2, 2.2))
-                plt.imshow(hm["matrix"], cmap="coolwarm", vmin=-1, vmax=1)
-                plt.title("Correlation Heatmap")
-                plt.colorbar(shrink=0.7)
-                plt.xticks(range(len(hm["columns"])), hm["columns"], rotation=45, ha="right", fontsize=6)
-                plt.yticks(range(len(hm["columns"])), hm["columns"], fontsize=6)
-                plt.tight_layout()
-                img2 = io.BytesIO(); plt.savefig(img2, format="png", dpi=150); plt.close(); img2.seek(0)
-                c.drawImage(ImageReader(img2), 11*cm, 2*cm, width=7*cm, height=5*cm, preserveAspectRatio=True)
-            except Exception:
-                pass
-    else:
-        # Small note so users know why charts aren't in the PDF
-        c.setFont("Helvetica-Oblique", 9)
-        c.drawString(2*cm, 2*cm, "Chart images omitted (matplotlib not installed on this server).")
-
-    c.showPage()
-    c.save()
-    buff.seek(0)
-    return buff.read()    # Basic PDF with summary + small plots (hist + heatmap if present)
-    from reportlab.lib.pagesizes import A4
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.units import cm
-    from reportlab.lib.utils import ImageReader
-    import matplotlib.pyplot as plt
-
-    buff = io.BytesIO()
-    c = canvas.Canvas(buff, pagesize=A4)
-    width, height = A4
-
-    # Title
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(2*cm, height-2*cm, "AI-Powered Data Analysis Report")
-    c.setFont("Helvetica", 10)
-    c.drawString(2*cm, height-2.6*cm, f"Analysis ID: {analysis['analysis_id']}  |  Rows: {analysis['summary']['rows']}  |  Columns: {analysis['summary']['columns']}")
-
-    # Insights
-    y = height - 3.4*cm
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(2*cm, y, "Key Insights")
-    y -= 0.6*cm
-    c.setFont("Helvetica", 10)
-    for ins in analysis["insights"][:6]:
-        c.drawString(2.2*cm, y, f"- {ins}")
-        y -= 0.5*cm
-        if y < 4*cm:
-            c.showPage(); y = height - 3*cm
-
-    # Matplotlib images (histogram of first numeric + heatmap)
-    charts = analysis["charts"]
-    # Hist
+    # Draw simple histogram (ReportLab primitives)
     if charts.get("histograms"):
         h = charts["histograms"][0]
-        plt.figure(figsize=(3.2, 2.2))
-        bins = np.array(h["bins"]); counts = np.array(h["counts"])
-        plt.bar((bins[:-1] + bins[1:]) / 2, counts, width=(bins[1]-bins[0])*0.8)
-        plt.title(f"Histogram - {h['column']}")
-        plt.tight_layout()
-        img = io.BytesIO(); plt.savefig(img, format="png", dpi=150); plt.close(); img.seek(0)
-        c.drawImage(ImageReader(img), 2*cm, 2*cm, width=7*cm, height=5*cm, preserveAspectRatio=True)
+        counts = list(h.get("counts", []))
+        if counts:
+            # Frame
+            x0, y0, w, hgt = 2*cm, 2.5*cm, 7.5*cm, 4.5*cm
+            c.setStrokeColor(black); c.rect(x0, y0, w, hgt, stroke=1, fill=0)
+            maxc = max(counts) or 1
+            bar_w = w / len(counts)
+            c.setFillColor(HexColor("#6C5CE7"))
+            for i, cnt in enumerate(counts):
+                bh = (cnt / maxc) * (hgt - 0.2*cm)
+                c.rect(x0 + i*bar_w + 1, y0, bar_w - 2, bh, stroke=0, fill=1)
+            c.setFont("Helvetica", 9)
+            c.drawString(x0, y0 + hgt + 0.2*cm, f"Histogram - {h.get('column','')}")
 
-    # Heatmap
+    # Draw correlation heatmap
     if charts.get("heatmap"):
         hm = charts["heatmap"]
-        plt.figure(figsize=(3.2, 2.2))
-        plt.imshow(hm["matrix"], cmap="coolwarm", vmin=-1, vmax=1)
-        plt.title("Correlation Heatmap")
-        plt.colorbar(shrink=0.7)
-        plt.xticks(range(len(hm["columns"])), hm["columns"], rotation=45, ha="right", fontsize=6)
-        plt.yticks(range(len(hm["columns"])), hm["columns"], fontsize=6)
-        plt.tight_layout()
-        img2 = io.BytesIO(); plt.savefig(img2, format="png", dpi=150); plt.close(); img2.seek(0)
-        c.drawImage(ImageReader(img2), 11*cm, 2*cm, width=7*cm, height=5*cm, preserveAspectRatio=True)
+        matrix = hm.get("matrix", [])
+        cols = hm.get("columns", [])
+        n = len(cols)
+        if n and len(matrix) == n:
+            size = 6.8*cm
+            x0, y0 = 11*cm, 2.2*cm
+            cell = size / n
+            # Frame
+            c.setStrokeColor(black); c.rect(x0, y0, size, size, stroke=1, fill=0)
+            for r in range(n):
+                row = matrix[r]
+                for col in range(n):
+                    val = row[col]
+                    c.setFillColor(_color_from_corr(val))
+                    cx = x0 + col * cell
+                    cy = y0 + (n - 1 - r) * cell
+                    c.rect(cx, cy, cell, cell, stroke=0, fill=1)
+            c.setFont("Helvetica", 6)
+            # X labels (top)
+            for i, name in enumerate(cols):
+                c.saveState()
+                c.translate(x0 + i*cell + cell/2, y0 + size + 0.15*cm)
+                c.rotate(45)
+                c.drawCentredString(0, 0, str(name)[:16])
+                c.restoreState()
+            # Y labels (left)
+            for i, name in enumerate(reversed(cols)):
+                c.drawRightString(x0 - 0.1*cm, y0 + i*cell + cell/2 - 2, str(name)[:16])
+            c.setFont("Helvetica", 9)
+            c.drawString(x0, y0 + size + 0.6*cm, "Correlation Heatmap")
 
     c.showPage()
     c.save()
@@ -401,7 +378,6 @@ def build_excel(analysis: Dict[str, Any]) -> bytes:
         df_sample.to_excel(writer, index=False, sheet_name="SampleData")
         summary.to_excel(writer, sheet_name="Summary")
         missing.to_excel(writer, index=False, sheet_name="Missingness")
-        # Correlations
         hm = analysis["charts"].get("heatmap")
         if hm:
             corr_df = pd.DataFrame(hm["matrix"], index=hm["columns"], columns=hm["columns"])
@@ -426,7 +402,6 @@ def analyze(file: UploadFile = File(...)):
     analysis_id = str(uuid.uuid4())
     profile_url = generate_profile(df, analysis_id)
 
-    # Small preview for UI table
     preview_rows = df.head(50).replace({np.nan: None}).to_dict(orient="records")
 
     ANALYSES[analysis_id] = {
@@ -440,15 +415,7 @@ def analyze(file: UploadFile = File(...)):
         "profile_url": profile_url,
     }
 
-    return {
-        "analysis_id": analysis_id,
-        "summary": summary,
-        "columns": cols_meta,
-        "charts": charts,
-        "insights": insights,
-        "preview_rows": preview_rows,
-        "profile_url": profile_url,
-    }
+    return ANALYSES[analysis_id]
 
 @app.get("/analysis/{analysis_id}", response_model=AnalyzeResponse)
 def get_analysis(analysis_id: str):
@@ -465,9 +432,15 @@ def download_report(analysis_id: str, format: str = Query("pdf", pattern="^(pdf|
         raise HTTPException(404, "Analysis not found or expired.")
     if format == "pdf":
         content = build_pdf(data)
-        return StreamingResponse(io.BytesIO(content), media_type="application/pdf",
-                                 headers={"Content-Disposition": f'attachment; filename="report_{analysis_id}.pdf"'})
+        return StreamingResponse(
+            io.BytesIO(content),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="report_{analysis_id}.pdf"'}
+        )
     else:
         content = build_excel(data)
-        return StreamingResponse(io.BytesIO(content), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                 headers={"Content-Disposition": f'attachment; filename="report_{analysis_id}.xlsx"'})
+        return StreamingResponse(
+            io.BytesIO(content),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="report_{analysis_id}.xlsx"'}
+        )
