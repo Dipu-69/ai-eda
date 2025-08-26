@@ -4,6 +4,8 @@ import Upload from "./pages/Upload";
 import Dashboard from "./pages/Dashboard";
 import DarkModeToggle from "./components/DarkModeToggle";
 import Footer from "./components/Footer";
+import Features from "./pages/Features";
+import ApiDocs from "./pages/ApiDocs";
 
 export default function App() {
   return (
@@ -13,6 +15,7 @@ export default function App() {
           <Link to="/" className="font-semibold text-brand-600">AI EDA</Link>
           <div className="flex items-center gap-4">
             <a href="#features" className="text-sm hover:underline">Features</a>
+            <Link to="/api" className="text-sm hover:underline">API Docs</Link> {/* NEW */}
             <Link to="/upload" className="text-sm hover:underline">Upload</Link>
             <DarkModeToggle />
           </div>
@@ -22,6 +25,8 @@ export default function App() {
       <div className="flex-1">
         <Routes>
           <Route path="/" element={<Landing />} />
+           <Route path="/features" element={<Features />} />   {/* NEW */}
+           <Route path="/api" element={<ApiDocs />} />
           <Route path="/upload" element={<Upload />} />
           <Route path="/dashboard/:id" element={<Dashboard />} />
         </Routes>

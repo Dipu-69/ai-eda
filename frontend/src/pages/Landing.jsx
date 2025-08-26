@@ -2,6 +2,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { useState } from "react";
 import { motion } from "framer-motion";
 import { analyzeFile } from "../services/api";
+import HeroPreview from "../components/HeroPreview";
 
 const API_DOCS = (import.meta.env.VITE_API_URL || "") + "/docs";
 const SAMPLE_URL = "https://raw.githubusercontent.com/mwaskom/seaborn-data/master/tips.csv";
@@ -58,14 +59,12 @@ export default function Landing() {
                 >
                   {loadingSample ? "Analyzing sample…" : "Try a sample dataset"}
                 </button>
-                <a
-                  href={API_DOCS}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-2 rounded-lg border px-5 py-3 hover:bg-gray-50 dark:hover:bg-gray-800 transition"
-                >
-                  API Docs
-                </a>
+                <Link
+  to="/api"
+  className="inline-flex items-center gap-2 rounded-lg border px-6 py-3 hover:bg-gray-50 dark:hover:bg-gray-800 transition"
+>
+  API Docs
+</Link>
               </div>
               {error && <p className="mt-3 text-sm text-red-500">{error}</p>}
               <div className="mt-6 flex flex-wrap gap-3 text-xs text-gray-500">
@@ -78,7 +77,7 @@ export default function Landing() {
             </div>
 
             {/* Minimal live preview card (static chart image feel without data) */}
-            <PreviewCard />
+            <HeroPreview />
           </div>
         </div>
       </section>

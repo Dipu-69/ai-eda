@@ -15,7 +15,7 @@ export default function FileDropzone({ onFile }) {
       <p className="mb-4">Drag & drop CSV/Excel here or</p>
       <label className="inline-block cursor-pointer rounded bg-brand-600 text-white px-4 py-2">
         Choose file
-        <input type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={(e) => {
+        <input type="file" accept=".csv,.xlsx,.xls,.zip" className="hidden" onChange={(e) => {
           const f = e.target.files?.[0]; if (f) onFile(f);
         }} />
       </label>

@@ -1,71 +1,44 @@
 import io
-import os
-import uuid
 import time
-from pathlib import Path
-from typing import List, Dict, Any, Optional
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse, Response
-from pydantic import BaseModel
+from fastapi.responses import RedirectResponse
 
-# Optional EDA provider
-EDA_PROVIDER = os.getenv("EDA_PROVIDER", "").lower()  # "ydata" to enable profile generation
-STATIC_DIR = Path("static")
-(PROFILE_DIR := STATIC_DIR / "profiles").mkdir(parents=True, exist_ok=True)
+app = FastAPI(title="AI EDA API (Smart Forecast)", version="1.2.0")
 
-app = FastAPI(title="AI EDA API", version="1.1.0")
-
-# CORS
+# Open CORS for dev/hosted frontends
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict in prod
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Serve static for optional profiling HTML
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-# In-memory store (swap with Redis/db for persistence)
 ANALYSES: Dict[str, Dict[str, Any]] = {}
 TTL_SECONDS = 24 * 3600
 
-def _cleanup_store():
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse("/docs")
+
+@app.get("/health")
+def health():
+    # cleanup expired
     now = time.time()
     stale = [k for k, v in ANALYSES.items() if now - v.get("created_at", now) > TTL_SECONDS]
     for k in stale:
         ANALYSES.pop(k, None)
+    return {"status": "ok", "count": len(ANALYSES)}
 
-class ColumnMeta(BaseModel):
-    name: str
-    dtype: str
-    missing: int
-    unique: Optional[int] = None
-    sample_values: Optional[List[Any]] = None
-
-class AnalyzeResponse(BaseModel):
-    analysis_id: str
-    summary: Dict[str, Any]
-    columns: List[ColumnMeta]
-    charts: Dict[str, Any]
-    insights: List[str]
-    preview_rows: List[Dict[str, Any]]
-    profile_url: Optional[str] = None
-
-@app.get("/", include_in_schema=False)
-def root():
-    return RedirectResponse(url="/docs")
-
-@app.get("/favicon.ico", include_in_schema=False)
-def favicon():
-    return Response(status_code=204)
-
+# ----------------------------
+# IO
+# ----------------------------
 def read_dataframe(file: UploadFile) -> pd.DataFrame:
     name = (file.filename or "upload").lower()
     content = file.file.read()
@@ -75,7 +48,7 @@ def read_dataframe(file: UploadFile) -> pd.DataFrame:
         if name.endswith((".xlsx", ".xls")):
             return pd.read_excel(io.BytesIO(content))
         else:
-            # Robust CSV read with encoding fallback
+            # CSV with encoding fallback
             try:
                 return pd.read_csv(io.BytesIO(content))
             except Exception:
@@ -83,364 +56,397 @@ def read_dataframe(file: UploadFile) -> pd.DataFrame:
     except Exception as e:
         raise HTTPException(400, f"Failed to parse file: {e}")
 
+# ----------------------------
+# Helpers
+# ----------------------------
+def coerce_dates(df: pd.DataFrame) -> List[str]:
+    """Parse date-like columns aggressively; also synthesize from Year/Month[/Day] or MonthName."""
+    dt_cols: List[str] = []
+
+    # Already datetime
+    for c in df.columns:
+        if np.issubdtype(df[c].dtype, np.datetime64):
+            dt_cols.append(c)
+
+    def try_parse_series(s: pd.Series) -> Optional[pd.Series]:
+        # Try multiple strategies including day-first
+        for dayfirst in (False, True):
+            parsed = pd.to_datetime(s.astype(str), errors="coerce", infer_datetime_format=True, dayfirst=dayfirst)
+            if parsed.notna().mean() >= 0.4 and parsed.nunique(dropna=True) >= 6:
+                return parsed
+        return None
+
+    # Parse object columns
+    for c in df.columns:
+        if c in dt_cols or df[c].dtype != object:
+            continue
+        parsed = try_parse_series(df[c])
+        if parsed is not None:
+            df[c] = parsed
+            dt_cols.append(c)
+
+    # Name hits (lower thresholds)
+    name_hits = [c for c in df.columns if any(k in c.lower() for k in
+                   ["date", "time", "timestamp", "datetime", "orderdate", "order_date", "invoice", "sale", "created", "posted"])]
+    for c in name_hits:
+        if c in dt_cols or np.issubdtype(df[c].dtype, np.datetime64):
+            continue
+        parsed = try_parse_series(df[c])
+        if parsed is not None:
+            df[c] = parsed
+            dt_cols.append(c)
+
+    # Synthesize from Year/Month/Day integer columns
+    lower = {c.lower(): c for c in df.columns}
+    y, m, d = lower.get("year"), lower.get("month"), lower.get("day")
+    if y and m and "__auto_date__" not in df.columns:
+        try:
+            day_vals = df[d] if d else 1
+            synth = pd.to_datetime(dict(year=df[y], month=df[m], day=day_vals), errors="coerce")
+            if synth.notna().sum() >= 6:
+                df["__auto_date__"] = synth
+                dt_cols.append("__auto_date__")
+        except Exception:
+            pass
+
+    # Synthesize from Year + MonthName (e.g., Jan/January)
+    mn = lower.get("monthname") or lower.get("month_name") or lower.get("month name")
+    if lower.get("year") and mn and "__auto_date2__" not in df.columns:
+        try:
+            # Map month labels to number
+            short = {"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,"jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12}
+            def to_month(v):
+                s = str(v).strip().lower()
+                if s[:3] in short: return short[s[:3]]
+                # try numeric strings
+                try:
+                    n = int(s)
+                    return n if 1 <= n <= 12 else None
+                except Exception:
+                    return None
+            month_num = pd.Series([to_month(v) for v in df[mn]])
+            synth2 = pd.to_datetime(dict(year=df[lower["year"]], month=month_num, day=1), errors="coerce")
+            if synth2.notna().sum() >= 6:
+                df["__auto_date2__"] = synth2
+                dt_cols.append("__auto_date2__")
+        except Exception:
+            pass
+
+    return dt_cols
+
 def summarize_dataframe(df: pd.DataFrame) -> Dict[str, Any]:
-    memory = int(df.memory_usage(deep=True).sum())
-    dtypes = df.dtypes.astype(str).to_dict()
-    missing_by_col = df.isna().sum().to_dict()
-    summary = {
+    return {
         "rows": int(df.shape[0]),
         "columns": int(df.shape[1]),
-        "memory_bytes": memory,
-        "dtypes": dtypes,
+        "memory_bytes": int(df.memory_usage(deep=True).sum()),
         "missing_total": int(df.isna().sum().sum()),
-        "missing_by_col": missing_by_col,
+        "missing_by_col": {c: int(df[c].isna().sum()) for c in df.columns},
         "duplicate_rows": int(df.duplicated().sum()),
+        "dtypes": df.dtypes.astype(str).to_dict(),
     }
-    return summary
 
-def build_columns_meta(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    cols = []
+def columns_meta(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    out = []
     for c in df.columns:
         ser = df[c]
-        meta = {
+        out.append({
             "name": c,
             "dtype": str(ser.dtype),
             "missing": int(ser.isna().sum()),
-        }
-        try:
-            meta["unique"] = int(ser.nunique(dropna=True))
-            meta["sample_values"] = ser.dropna().astype(str).head(5).tolist()
-        except Exception:
-            pass
-        cols.append(meta)
-    return cols
+            "unique": int(ser.nunique(dropna=True)),
+            "sample_values": ser.dropna().astype(str).head(5).tolist(),
+        })
+    return out
 
-def build_chart_data(df: pd.DataFrame) -> Dict[str, Any]:
+def chart_data(df: pd.DataFrame) -> Dict[str, Any]:
     charts: Dict[str, Any] = {}
-    numerics = df.select_dtypes(include=[np.number]).columns.tolist()
-    categoricals = df.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
-    datetimes = [c for c in df.columns if np.issubdtype(df[c].dtype, np.datetime64)]
-    # Try to parse datetime-like strings
-    for c in df.columns:
-        if c not in datetimes and df[c].dtype == object:
-            try:
-                parsed = pd.to_datetime(df[c], errors="raise")
-                df[c] = parsed
-                datetimes.append(c)
-            except Exception:
-                pass
+    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    cat_cols = df.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
+    dt_cols = [c for c in df.columns if np.issubdtype(df[c].dtype, np.datetime64)]
 
-    # Sample to reduce payload
-    sample_df = df.sample(min(2000, len(df)), random_state=42) if len(df) > 2000 else df.copy()
+    sample = df.sample(min(2000, len(df)), random_state=42) if len(df) > 2000 else df.copy()
 
-    # Histograms for numeric columns
-    histograms = []
-    for c in numerics[:6]:  # limit
-        ser = sample_df[c].dropna()
-        if len(ser) == 0:
-            continue
-        counts, bins = np.histogram(ser, bins=20)
-        histograms.append({"column": c, "bins": bins.tolist(), "counts": counts.tolist()})
+    # histograms
+    hists = []
+    for c in num_cols[:6]:
+        s = sample[c].dropna()
+        if len(s) == 0: continue
+        cnts, bins = np.histogram(s, bins=20)
+        hists.append({"column": c, "bins": bins.tolist(), "counts": cnts.tolist()})
 
-    # Bar counts for top categorical columns
-    bar_counts = []
-    for c in categoricals[:6]:
-        vc = sample_df[c].astype(str).fillna("NaN").value_counts().head(10)
-        bar_counts.append({"column": c, "labels": vc.index.tolist(), "counts": vc.values.tolist()})
+    # bar counts
+    bars = []
+    for c in cat_cols[:6]:
+        vc = sample[c].astype(str).fillna("NaN").value_counts().head(10)
+        bars.append({"column": c, "labels": vc.index.tolist(), "counts": vc.values.tolist()})
 
-    # Pie (first categorical)
+    # pie
     pie = None
-    if categoricals:
-        vc = sample_df[categoricals[0]].astype(str).fillna("NaN").value_counts().head(8)
-        pie = {"column": categoricals[0], "labels": vc.index.tolist(), "values": vc.values.tolist()}
+    if cat_cols:
+        vc = sample[cat_cols[0]].astype(str).fillna("NaN").value_counts().head(8)
+        pie = {"column": cat_cols[0], "labels": vc.index.tolist(), "values": vc.values.tolist()}
 
-    # Correlation heatmap
+    # heatmap + scatter
     heatmap = None
-    if len(numerics) >= 2:
-        corr = sample_df[numerics].corr(numeric_only=True).fillna(0.0)
-        heatmap = {"columns": numerics, "matrix": corr.values.round(4).tolist()}
-
-    # Scatter of top correlated pair
     scatter = None
-    if heatmap:
-        corr_df = sample_df[numerics].corr(numeric_only=True).abs()
-        np.fill_diagonal(corr_df.values, 0)
-        try:
-            yx = corr_df.unstack().sort_values(ascending=False).index[0]
-            xcol, ycol = yx[0], yx[1]
-            pts = sample_df[[xcol, ycol]].dropna().head(500)
+    if len(num_cols) >= 2:
+        corr = sample[num_cols].corr(numeric_only=True).fillna(0.0)
+        heatmap = {"columns": num_cols, "matrix": corr.values.round(4).tolist()}
+        A = corr.abs().values.copy()
+        np.fill_diagonal(A, 0)
+        i, j = np.unravel_index(np.argmax(A), A.shape)
+        xcol, ycol = num_cols[i], num_cols[j]
+        pts = sample[[xcol, ycol]].dropna().head(500)
+        if len(pts):
             scatter = {"xCol": xcol, "yCol": ycol, "x": pts[xcol].tolist(), "y": pts[ycol].tolist()}
-        except Exception:
-            pass
 
-    # Time series (first datetime + first 1-2 numeric agg mean)
+    # time series
     timeseries = None
-    if datetimes and numerics:
-        tcol = datetimes[0]
-        df_ts = sample_df.dropna(subset=[tcol]).copy()
-        if not df_ts.empty:
-            df_ts["_d"] = pd.to_datetime(df_ts[tcol], errors="coerce")
-            grp = df_ts.set_index("_d").sort_index().resample("D")[numerics[:2]].mean().dropna(how="all").head(400)
-            timeseries = {
-                "dateCol": tcol,
-                "series": [
-                    {"metric": c, "x": grp.index.strftime("%Y-%m-%d").tolist(), "y": grp[c].fillna(0).tolist()}
-                    for c in grp.columns
-                ],
-            }
+    if dt_cols:
+        tcol = dt_cols[0]
+        tmp = sample.dropna(subset=[tcol]).copy()
+        if not tmp.empty:
+            tmp["_d"] = pd.to_datetime(tmp[tcol], errors="coerce")
+            num_cols2 = tmp.select_dtypes(include=[np.number]).columns.tolist()
+            if num_cols2:
+                grp = tmp.set_index("_d").sort_index().resample("D")[num_cols2[:2]].mean().dropna(how="all").head(400)
+                timeseries = {
+                    "dateCol": tcol,
+                    "series": [
+                        {"metric": c, "x": grp.index.strftime("%Y-%m-%d").tolist(), "y": grp[c].fillna(0).tolist()}
+                        for c in grp.columns
+                    ],
+                }
 
-    charts["histograms"] = histograms
-    charts["barCounts"] = bar_counts
+    charts["histograms"] = hists
+    charts["barCounts"] = bars
     charts["pie"] = pie
     charts["heatmap"] = heatmap
     charts["scatter"] = scatter
     charts["timeseries"] = timeseries
     return charts
 
-def generate_insights(df: pd.DataFrame, summary: Dict[str, Any], charts: Dict[str, Any]) -> List[str]:
-    insights = []
+def pick_target(df: pd.DataFrame) -> Tuple[Optional[str], str]:
+    """Pick a numeric target; ignore ID-like columns; prefer sales-like names; choose agg."""
+    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    rows = len(df)
+    if not num_cols:
+        return None, "sum"
+
+    def is_idlike(col: str) -> bool:
+        u = df[col].nunique(dropna=True)
+        return rows > 0 and (u / rows) >= 0.98
+
+    candidates = [c for c in num_cols if not is_idlike(c) and df[c].notna().sum() >= 6] or num_cols
+
+    prefs_sum = ["sales", "revenue", "amount", "qty", "quantity", "units", "orders", "profit", "turnover", "count", "gmv", "visits", "views", "clicks", "volume", "sold"]
+    prefs_mean = ["price", "cost", "rate", "avg", "average", "margin"]
+
+    lower = {c.lower(): c for c in candidates}
+    for p in prefs_sum:
+        for lc, orig in lower.items():
+            if p in lc:
+                return orig, "sum"
+    for p in prefs_mean:
+        for lc, orig in lower.items():
+            if p in lc:
+                return orig, "mean"
+
+    var = df[candidates].var(numeric_only=True).fillna(0.0)
+    if len(var):
+        return var.sort_values(ascending=False).index[0], "sum"
+    return candidates[0], "sum"
+
+def pick_date_col(df: pd.DataFrame) -> Optional[str]:
+    dt_cols = [c for c in df.columns if np.issubdtype(df[c].dtype, np.datetime64)]
+    if not dt_cols:
+        return None
+    # pick the one with most unique timestamps (must have at least 6 unique)
+    dt_cols_sorted = sorted(dt_cols, key=lambda c: df[c].nunique(dropna=True), reverse=True)
+    top = dt_cols_sorted[0]
+    return top if df[top].nunique(dropna=True) >= 6 else None
+
+def simple_forecast(df: pd.DataFrame, date_col: str, target: str, agg: str = "sum",
+                    freq: str = "auto", horizon: Optional[int] = None) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Trend + simple seasonality with D→W→M fallback. Needs a few aggregated points."""
+    try:
+        s = df[[date_col, target]].copy()
+        s[date_col] = pd.to_datetime(s[date_col], errors="coerce")
+        s = s.dropna(subset=[date_col, target])
+        if s.empty:
+            return None, "no_valid_rows_after_parsing"
+
+        s = s.set_index(date_col).sort_index()
+        freqs = ["D", "W", "M"] if freq == "auto" else [freq]
+        mins = {"D": 10, "W": 6, "M": 4}          # forgiving minimums
+        default_h = {"D": 14, "W": 8, "M": 6}
+
+        last_reason = "unknown"
+        for f in freqs:
+            y = s[target].resample(f).sum().dropna() if agg == "sum" else s[target].resample(f).mean().dropna()
+            if len(y) < mins[f]:
+                last_reason = f"insufficient_points_{f.lower()}={len(y)}"
+                continue
+
+            dfm = y.to_frame("y")
+            dfm["t"] = np.arange(len(dfm))
+            # Seasonality: D/W -> day-of-week; M -> month
+            if f in ("D", "W"):
+                season_idx = dfm.index.dayofweek
+                season_ohe = pd.get_dummies(season_idx, prefix="dow")
+            else:
+                season_idx = dfm.index.month
+                season_ohe = pd.get_dummies(season_idx, prefix="mon")
+
+            X = np.column_stack([np.ones(len(dfm)), dfm["t"].values, season_ohe.values])
+            beta, *_ = np.linalg.lstsq(X, dfm["y"].values, rcond=None)
+            y_hat = X @ beta
+
+            split = max(5, int(len(dfm) * 0.8))
+            y_true_bt = dfm["y"].values[split:]
+            y_hat_bt = y_hat[split:]
+            mae = float(np.mean(np.abs(y_true_bt - y_hat_bt)))
+            rmse = float(np.sqrt(np.mean((y_true_bt - y_hat_bt) ** 2)))
+            mape = float(np.mean(np.abs((y_true_bt - y_hat_bt) / np.where(y_true_bt == 0, 1e-9, y_true_bt)))) * 100.0
+
+            H = horizon or default_h[f]
+            step = pd.tseries.frequencies.to_offset(f)
+            future_idx = pd.date_range(dfm.index[-1] + step, periods=H, freq=f)
+            # Future seasonality
+            if f in ("D", "W"):
+                f_season = pd.get_dummies(future_idx.dayofweek, prefix="dow")
+            else:
+                f_season = pd.get_dummies(future_idx.month, prefix="mon")
+            for col in season_ohe.columns:
+                if col not in f_season.columns:
+                    f_season[col] = 0
+            f_season = f_season[season_ohe.columns]
+
+            X_future = np.column_stack([
+                np.ones(len(future_idx)),
+                np.arange(dfm["t"].iloc[-1] + 1, dfm["t"].iloc[-1] + 1 + H),
+                f_season.values
+            ])
+            y_future = X_future @ beta
+
+            forecast = {
+                "target": target,
+                "dateCol": date_col,
+                "horizon": H,
+                "freq": f,
+                "agg": agg,
+                "metrics": {"mae": mae, "rmse": rmse, "mape": mape},
+                "backtest": {
+                    "x": dfm.index.astype(str).tolist()[split:],
+                    "y_true": [float(v) for v in y_true_bt.tolist()],
+                    "y_hat": [float(v) for v in y_hat_bt.tolist()],
+                },
+                "forecast": {
+                    "x": future_idx.astype(str).tolist(),
+                    "y_hat": [float(v) for v in y_future.tolist()],
+                },
+                "note": f"Trend + simple seasonal model on {f}-aggregated {target} ({agg}).",
+            }
+            return forecast, ""
+
+        return None, last_reason
+    except Exception as e:
+        return None, f"forecast_error: {e}"
+
+def insights(df: pd.DataFrame, summary: Dict[str, Any], ch: Dict[str, Any], fc: Optional[Dict[str, Any]]) -> List[str]:
+    out: List[str] = []
     # Missingness
     miss = summary.get("missing_by_col", {})
     if miss:
-        top_miss = sorted(miss.items(), key=lambda x: x[1], reverse=True)[:3]
-        for c, v in top_miss:
+        top = sorted(miss.items(), key=lambda x: x[1], reverse=True)[:3]
+        for c, v in top:
             if v > 0:
                 pct = v / summary["rows"] * 100 if summary["rows"] else 0
-                insights.append(f"Column '{c}' has {v} missing values ({pct:.1f}%). Consider imputation or dropping.")
+                out.append(f"Column '{c}' has {v} missing values ({pct:.1f}%). Consider imputation or dropping.")
     # Correlations
-    if charts.get("heatmap"):
-        cols = charts["heatmap"]["columns"]
-        corr = np.array(charts["heatmap"]["matrix"])
-        np.fill_diagonal(corr, 0)
-        if corr.size:
-            idx = np.unravel_index(np.argmax(np.abs(corr)), corr.shape)
-            max_val = corr[idx]
-            if abs(max_val) >= 0.6:
-                insights.append(f"Strong relationship detected between '{cols[idx[0]]}' and '{cols[idx[1]]}' (|r|={abs(max_val):.2f}).")
+    hm = ch.get("heatmap")
+    if hm:
+        cols = hm["columns"]; mat = np.array(hm["matrix"])
+        if mat.size:
+            np.fill_diagonal(mat, 0)
+            i, j = np.unravel_index(np.argmax(np.abs(mat)), mat.shape)
+            val = float(mat[i, j])
+            if abs(val) >= 0.6:
+                out.append(f"Strong relationship between '{cols[i]}' and '{cols[j]}' (|r|={abs(val):.2f}).")
     # Dominant categories
-    for b in charts.get("barCounts", [])[:2]:
+    for b in ch.get("barCounts", [])[:2]:
         if b["labels"]:
-            top_label, top_count = b["labels"][0], b["counts"][0]
-            share = top_count / sum(b["counts"]) * 100 if sum(b["counts"]) else 0
-            insights.append(f"In '{b['column']}', '{top_label}' is the most frequent category ({share:.1f}%).")
-    # Distribution skew
-    numerics = df.select_dtypes(include=[np.number]).columns
-    for c in list(numerics)[:2]:
-        ser = df[c].dropna()
-        if len(ser) > 10:
-            skew = ser.skew()
-            if abs(skew) > 1:
-                direction = "right-skewed" if skew > 0 else "left-skewed"
-                insights.append(f"'{c}' appears {direction} (skew={skew:.2f}); consider transform or robust stats.")
-    # Trend
-    dt_cols = [c for c in df.columns if np.issubdtype(df[c].dtype, np.datetime64)]
-    if dt_cols and len(numerics) >= 1:
-        t = pd.to_datetime(df[dt_cols[0]], errors="coerce")
-        ser = df[numerics[0]]
-        mask = t.notna() & ser.notna()
-        if mask.sum() > 5:
-            t_idx = t[mask].astype("int64")  # ns
-            idx = (t_idx - t_idx.min()) / 1e9
-            corr = np.corrcoef(idx, ser[mask])[0, 1]
-            if abs(corr) > 0.2:
-                sign = "increasing" if corr > 0 else "decreasing"
-                insights.append(f"'{numerics[0]}' shows a mildly {sign} trend over time (r={corr:.2f}).")
-    if not insights:
-        insights.append("Data looks healthy. No strong trends or issues detected in the sample.")
-    return insights
+            share = (b["counts"][0] / (sum(b["counts"]) or 1)) * 100
+            out.append(f"In '{b['column']}', '{b['labels'][0]}' is the most frequent category ({share:.1f}%).")
+    # Skewness
+    for c in list(df.select_dtypes(include=[np.number]).columns)[:2]:
+        s = df[c].dropna()
+        if len(s) > 10:
+            sk = float(s.skew())
+            if abs(sk) > 1:
+                out.append(f"'{c}' is {'right' if sk>0 else 'left'}-skewed (skew={sk:.2f}); consider transform or robust stats.")
+    # Forecast
+    if fc and fc.get("forecast"):
+        next_total = float(np.sum(fc["forecast"]["y_hat"]))
+        unit = fc.get("freq", "D")
+        out.append(f"Forecast suggests total {fc['target']} of ~{next_total:.2f} over the next {fc['horizon']} {unit}-periods.")
+    if not out:
+        out.append("Data looks healthy. No strong trends or issues detected.")
+    return out
 
-def generate_profile(df: pd.DataFrame, analysis_id: str) -> Optional[str]:
-    if EDA_PROVIDER != "ydata":
-        return None
-    try:
-        from ydata_profiling import ProfileReport
-        report = ProfileReport(df, title="Automated EDA", minimal=True)
-        out_path = PROFILE_DIR / f"{analysis_id}.html"
-        report.to_file(out_path)
-        return f"/static/profiles/{analysis_id}.html"
-    except Exception:
-        return None
-
-# ReportLab-only PDF (no matplotlib)
-def _color_from_corr(val: float):
-    # Map [-1, 0, 1] -> [blue, white, red]
-    from reportlab.lib.colors import Color
-    v = max(-1.0, min(1.0, float(val)))
-    if v >= 0:
-        # white -> red
-        r = 1.0
-        g = 1.0 - 0.6 * v
-        b = 1.0 - 0.6 * v
-    else:
-        # blue -> white
-        v = abs(v)
-        r = 1.0 - 0.6 * v
-        g = 1.0 - 0.6 * v
-        b = 1.0
-    return Color(r, g, b)
-
-def build_pdf(analysis: Dict[str, Any]) -> bytes:
-    from reportlab.lib.pagesizes import A4
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.units import cm
-    from reportlab.lib.colors import black, HexColor
-
-    buff = io.BytesIO()
-    c = canvas.Canvas(buff, pagesize=A4)
-    width, height = A4
-
-    # Title
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(2*cm, height-2*cm, "AI-Powered Data Analysis Report")
-    c.setFont("Helvetica", 10)
-    c.drawString(
-        2*cm, height-2.6*cm,
-        f"Analysis ID: {analysis['analysis_id']} | Rows: {analysis['summary']['rows']} | Columns: {analysis['summary']['columns']}"
-    )
-
-    # Insights
-    y = height - 3.4*cm
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(2*cm, y, "Key Insights")
-    y -= 0.6*cm
-    c.setFont("Helvetica", 10)
-    for ins in analysis["insights"][:8]:
-        c.drawString(2.2*cm, y, f"- {ins}")
-        y -= 0.5*cm
-        if y < 3.8*cm:
-            c.showPage(); y = height - 3*cm
-            c.setFont("Helvetica", 10)
-
-    charts = analysis.get("charts", {})
-
-    # Draw simple histogram (ReportLab primitives)
-    if charts.get("histograms"):
-        h = charts["histograms"][0]
-        counts = list(h.get("counts", []))
-        if counts:
-            # Frame
-            x0, y0, w, hgt = 2*cm, 2.5*cm, 7.5*cm, 4.5*cm
-            c.setStrokeColor(black); c.rect(x0, y0, w, hgt, stroke=1, fill=0)
-            maxc = max(counts) or 1
-            bar_w = w / len(counts)
-            c.setFillColor(HexColor("#6C5CE7"))
-            for i, cnt in enumerate(counts):
-                bh = (cnt / maxc) * (hgt - 0.2*cm)
-                c.rect(x0 + i*bar_w + 1, y0, bar_w - 2, bh, stroke=0, fill=1)
-            c.setFont("Helvetica", 9)
-            c.drawString(x0, y0 + hgt + 0.2*cm, f"Histogram - {h.get('column','')}")
-
-    # Draw correlation heatmap
-    if charts.get("heatmap"):
-        hm = charts["heatmap"]
-        matrix = hm.get("matrix", [])
-        cols = hm.get("columns", [])
-        n = len(cols)
-        if n and len(matrix) == n:
-            size = 6.8*cm
-            x0, y0 = 11*cm, 2.2*cm
-            cell = size / n
-            # Frame
-            c.setStrokeColor(black); c.rect(x0, y0, size, size, stroke=1, fill=0)
-            for r in range(n):
-                row = matrix[r]
-                for col in range(n):
-                    val = row[col]
-                    c.setFillColor(_color_from_corr(val))
-                    cx = x0 + col * cell
-                    cy = y0 + (n - 1 - r) * cell
-                    c.rect(cx, cy, cell, cell, stroke=0, fill=1)
-            c.setFont("Helvetica", 6)
-            # X labels (top)
-            for i, name in enumerate(cols):
-                c.saveState()
-                c.translate(x0 + i*cell + cell/2, y0 + size + 0.15*cm)
-                c.rotate(45)
-                c.drawCentredString(0, 0, str(name)[:16])
-                c.restoreState()
-            # Y labels (left)
-            for i, name in enumerate(reversed(cols)):
-                c.drawRightString(x0 - 0.1*cm, y0 + i*cell + cell/2 - 2, str(name)[:16])
-            c.setFont("Helvetica", 9)
-            c.drawString(x0, y0 + size + 0.6*cm, "Correlation Heatmap")
-
-    c.showPage()
-    c.save()
-    buff.seek(0)
-    return buff.read()
-
-def build_excel(analysis: Dict[str, Any]) -> bytes:
-    output = io.BytesIO()
-    df_sample = pd.DataFrame(analysis["preview_rows"])
-    summary = pd.DataFrame([analysis["summary"]]).T.rename(columns={0: "value"})
-    missing = pd.DataFrame(analysis["summary"]["missing_by_col"].items(), columns=["column", "missing"])
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_sample.to_excel(writer, index=False, sheet_name="SampleData")
-        summary.to_excel(writer, sheet_name="Summary")
-        missing.to_excel(writer, index=False, sheet_name="Missingness")
-        hm = analysis["charts"].get("heatmap")
-        if hm:
-            corr_df = pd.DataFrame(hm["matrix"], index=hm["columns"], columns=hm["columns"])
-            corr_df.to_excel(writer, sheet_name="Correlations")
-    output.seek(0)
-    return output.read()
-
-@app.get("/health")
-def health():
-    _cleanup_store()
-    return {"status": "ok", "count": len(ANALYSES)}
-
-@app.post("/analyze", response_model=AnalyzeResponse)
+# ----------------------------
+# API
+# ----------------------------
+@app.post("/analyze")
 def analyze(file: UploadFile = File(...)):
     df = read_dataframe(file)
     if df.empty:
         raise HTTPException(400, "No rows parsed from file.")
-    summary = summarize_dataframe(df)
-    cols_meta = build_columns_meta(df)
-    charts = build_chart_data(df.copy())
-    insights = generate_insights(df, summary, charts)
-    analysis_id = str(uuid.uuid4())
-    profile_url = generate_profile(df, analysis_id)
 
+    # Parse dates for better detection
+    coerce_dates(df)
+
+    summary = summarize_dataframe(df)
+    cols = columns_meta(df)
+    charts = chart_data(df)
+
+    # Detect and forecast
+    date_col = pick_date_col(df)
+    target, agg = pick_target(df)
+    forecast: Optional[Dict[str, Any]] = None
+    forecast_reason = ""
+    if date_col and target:
+        forecast, forecast_reason = simple_forecast(df, date_col, target, agg=agg, freq="auto", horizon=None)
+    else:
+        if not date_col and not target:
+            forecast_reason = "no_date_and_no_numeric_target_detected"
+        elif not date_col:
+            forecast_reason = "no_date_column_detected"
+        else:
+            forecast_reason = "no_numeric_target_detected"
+
+    ai = insights(df, summary, charts, forecast)
+
+    analysis_id = str(uuid.uuid4())
     preview_rows = df.head(50).replace({np.nan: None}).to_dict(orient="records")
 
-    ANALYSES[analysis_id] = {
-        "created_at": time.time(),
+    payload = {
         "analysis_id": analysis_id,
         "summary": summary,
-        "columns": cols_meta,
+        "columns": cols,
         "charts": charts,
-        "insights": insights,
+        "forecast": forecast,
+        "forecast_reason": forecast_reason,
+        "insights": ai,
+        "detected": {"dateCol": date_col, "target": target, "agg": agg, "freq": forecast.get("freq") if forecast else None},
         "preview_rows": preview_rows,
-        "profile_url": profile_url,
     }
+    ANALYSES[analysis_id] = {"created_at": time.time(), **payload}
+    return payload
 
-    return ANALYSES[analysis_id]
-
-@app.get("/analysis/{analysis_id}", response_model=AnalyzeResponse)
+@app.get("/analysis/{analysis_id}")
 def get_analysis(analysis_id: str):
-    _cleanup_store()
-    data = ANALYSES.get(analysis_id)
-    if not data:
+    rec = ANALYSES.get(analysis_id)
+    if not rec:
         raise HTTPException(404, "Analysis not found or expired.")
-    return data
-
-@app.get("/download-report")
-def download_report(analysis_id: str, format: str = Query("pdf", pattern="^(pdf|xlsx)$")):
-    data = ANALYSES.get(analysis_id)
-    if not data:
-        raise HTTPException(404, "Analysis not found or expired.")
-    if format == "pdf":
-        content = build_pdf(data)
-        return StreamingResponse(
-            io.BytesIO(content),
-            media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="report_{analysis_id}.pdf"'}
-        )
-    else:
-        content = build_excel(data)
-        return StreamingResponse(
-            io.BytesIO(content),
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f'attachment; filename="report_{analysis_id}.xlsx"'}
-        )
+    return rec

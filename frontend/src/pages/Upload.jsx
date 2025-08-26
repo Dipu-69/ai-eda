@@ -1,7 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { useState } from "react";
 import FileDropzone from "../components/FileDropzone";
-import { analyzeFile } from "../services/api";
+import { analyzeFile, LIMITS } from "../services/api";
 
 export default function Upload() {
   const [loading, setLoading] = useState(false);
@@ -14,8 +14,7 @@ export default function Upload() {
       const res = await analyzeFile(file);
       navigate(`/dashboard/${res.analysis_id}`, { state: res });
     } catch (e) {
-      const msg = e?.response?.data?.detail || "Upload failed";
-      setError(msg);
+      setError(e?.message || "Upload failed");
     } finally {
       setLoading(false);
     }
@@ -25,8 +24,11 @@ export default function Upload() {
     <div className="mx-auto max-w-3xl px-6 py-12">
       <h2 className="text-2xl font-semibold mb-6">Upload a dataset</h2>
       <FileDropzone onFile={handleFile} />
+      <p className="mt-3 text-xs text-gray-500">
+        Size limits (Codespaces): Raw CSV/Excel up to {LIMITS.RAW_MB} MB. Larger CSV files are auto‑zipped in the browser (up to {LIMITS.ZIP_MB} MB ZIP).
+      </p>
       {loading && <p className="mt-4 text-sm">Analyzing…</p>}
-      {error && <p className="mt-4 text-sm text-red-500">{error}</p>}
+      {error && <p className="mt-2 text-sm text-red-500">{error}</p>}
     </div>
   );
 }
