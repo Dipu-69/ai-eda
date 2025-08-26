@@ -254,7 +254,85 @@ def generate_profile(df: pd.DataFrame, analysis_id: str) -> Optional[str]:
         return None
 
 def build_pdf(analysis: Dict[str, Any]) -> bytes:
-    # Basic PDF with summary + small plots (hist + heatmap if present)
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.units import cm
+    from reportlab.lib.utils import ImageReader
+    import io
+    import numpy as np
+
+    buff = io.BytesIO()
+    c = canvas.Canvas(buff, pagesize=A4)
+    width, height = A4
+
+    # Title
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(2*cm, height-2*cm, "AI-Powered Data Analysis Report")
+    c.setFont("Helvetica", 10)
+    c.drawString(2*cm, height-2.6*cm, f"Analysis ID: {analysis['analysis_id']}  |  Rows: {analysis['summary']['rows']}  |  Columns: {analysis['summary']['columns']}")
+
+    # Insights
+    y = height - 3.4*cm
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(2*cm, y, "Key Insights")
+    y -= 0.6*cm
+    c.setFont("Helvetica", 10)
+    for ins in analysis["insights"][:8]:
+        c.drawString(2.2*cm, y, f"- {ins}")
+        y -= 0.5*cm
+        if y < 3.5*cm:
+            c.showPage(); y = height - 3*cm
+
+    charts = analysis.get("charts", {})
+
+    # Try matplotlib; if not available, skip images (no crash)
+    try:
+        import matplotlib.pyplot as plt
+        ok_matplotlib = True
+    except Exception as e:
+        ok_matplotlib = False
+        err = str(e)
+
+    if ok_matplotlib:
+        # Histogram
+        if charts.get("histograms"):
+            h = charts["histograms"][0]
+            try:
+                import numpy as _np
+                plt.figure(figsize=(3.2, 2.2))
+                bins = _np.array(h["bins"]); counts = _np.array(h["counts"])
+                plt.bar((bins[:-1] + bins[1:]) / 2, counts, width=(bins[1]-bins[0])*0.8)
+                plt.title(f"Histogram - {h['column']}")
+                plt.tight_layout()
+                img = io.BytesIO(); plt.savefig(img, format="png", dpi=150); plt.close(); img.seek(0)
+                c.drawImage(ImageReader(img), 2*cm, 2*cm, width=7*cm, height=5*cm, preserveAspectRatio=True)
+            except Exception:
+                pass
+
+        # Heatmap
+        if charts.get("heatmap"):
+            try:
+                hm = charts["heatmap"]
+                plt.figure(figsize=(3.2, 2.2))
+                plt.imshow(hm["matrix"], cmap="coolwarm", vmin=-1, vmax=1)
+                plt.title("Correlation Heatmap")
+                plt.colorbar(shrink=0.7)
+                plt.xticks(range(len(hm["columns"])), hm["columns"], rotation=45, ha="right", fontsize=6)
+                plt.yticks(range(len(hm["columns"])), hm["columns"], fontsize=6)
+                plt.tight_layout()
+                img2 = io.BytesIO(); plt.savefig(img2, format="png", dpi=150); plt.close(); img2.seek(0)
+                c.drawImage(ImageReader(img2), 11*cm, 2*cm, width=7*cm, height=5*cm, preserveAspectRatio=True)
+            except Exception:
+                pass
+    else:
+        # Small note so users know why charts aren't in the PDF
+        c.setFont("Helvetica-Oblique", 9)
+        c.drawString(2*cm, 2*cm, "Chart images omitted (matplotlib not installed on this server).")
+
+    c.showPage()
+    c.save()
+    buff.seek(0)
+    return buff.read()    # Basic PDF with summary + small plots (hist + heatmap if present)
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas
     from reportlab.lib.units import cm
