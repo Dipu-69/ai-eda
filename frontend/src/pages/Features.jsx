@@ -1,6 +1,7 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useState } from "react";
 import { analyzeFile } from "../services/api";
+import NavBar from "../components/NavBar";
 
 const SAMPLE_URL = "https://raw.githubusercontent.com/mwaskom/seaborn-data/master/tips.csv";
 
@@ -26,69 +27,78 @@ export default function Features() {
   }
 
   return (
-    <div className="mx-auto max-w-6xl px-6 py-10 space-y-10">
-      {/* Hero */}
-      <section className="text-left">
-        <h1 className="text-3xl md:text-4xl font-extrabold tracking-tight">Everything you need to get insights fast</h1>
-        <p className="mt-3 text-lg text-gray-600 dark:text-gray-300">
-          Upload a CSV/Excel, explore interactive charts, get plain‑English insights, and a quick forecast when there’s a time series.
-        </p>
-        <div className="mt-6 flex flex-wrap gap-3">
-          <Link to="/upload" className="inline-flex items-center gap-2 rounded-lg bg-brand-600 text-white px-5 py-3 hover:brightness-110 transition">
-            Upload your data
-          </Link>
-          <button
-            onClick={trySample}
-            disabled={loadingSample}
-            className="inline-flex items-center gap-2 rounded-lg border px-5 py-3 hover:bg-gray-50 dark:hover:bg-gray-800 transition"
-          >
-            {loadingSample ? "Analyzing sample…" : "Try a sample dataset"}
-          </button>
-        </div>
-        {error && <p className="mt-3 text-sm text-red-500">{error}</p>}
-      </section>
+    <>
+      <NavBar />
 
-      {/* Feature grid */}
-      <section>
-        <h2 className="text-xl font-semibold">Core features</h2>
-        <div className="mt-4 grid sm:grid-cols-2 lg:grid-cols-3 gap-5">
-          <FeatureCard icon={<IconBolt />} title="Automated EDA" desc="Data summary, missingness, dtypes, duplicates, and quick column stats." />
-          <FeatureCard icon={<IconChart />} title="Interactive charts" desc="Histograms, bar/pie, scatter, correlation heatmap, and time‑series." />
-          <FeatureCard icon={<IconSpark />} title="AI insights" desc="Plain‑English takeaways: strongest relationships, skew, dominant categories, trends." />
-          <FeatureCard icon={<IconSlider />} title="Filters" desc="Slice by categories to focus on what matters (client-side, fast)." />
-          <FeatureCard icon={<IconForecast />} title="Forecast" desc="Detects date + target and produces a trend+seasonality forecast with backtest metrics." />
-          <FeatureCard icon={<IconShield />} title="Privacy" desc="Data is processed server‑side and kept only in a short‑lived memory cache." />
-        </div>
-      </section>
-
-      {/* How it works */}
-      <section>
-        <h2 className="text-xl font-semibold">How it works</h2>
-        <ol className="mt-3 grid md:grid-cols-3 gap-4">
-          <Step n={1} title="Upload" desc="CSV/Excel is parsed with robust fallbacks (encoding/date formats)." />
-          <Step n={2} title="Analyze" desc="Automated EDA + insight generation + chart-ready series." />
-          <Step n={3} title="Forecast" desc="If there’s a date/time and numeric target, a quick forecast is provided." />
-        </ol>
-      </section>
-
-      {/* CTA */}
-      <section className="rounded-xl p-6 border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
-        <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-          <div>
-            <div className="text-lg font-semibold">Ready to explore your data?</div>
-            <div className="text-sm text-gray-600 dark:text-gray-400">Upload a file or use the sample and jump straight into charts and insights.</div>
-          </div>
-          <div className="flex gap-3">
-            <Link to="/upload" className="inline-flex items-center gap-2 rounded-lg bg-brand-600 text-white px-4 py-2 hover:brightness-110">
-              Upload now
+      <div className="mx-auto max-w-6xl px-6 py-10 space-y-10">
+        {/* Hero */}
+        <section className="text-left">
+          <h1 className="text-3xl md:text-4xl font-extrabold tracking-tight">
+            Everything you need to get insights fast
+          </h1>
+          <p className="mt-3 text-lg text-gray-600 dark:text-gray-300">
+            Upload a CSV/Excel, explore interactive charts, get plain‑English insights, and a quick forecast when there’s a time series.
+          </p>
+          <div className="mt-6 flex flex-wrap gap-3">
+            <Link
+              to="/upload"
+              className="inline-flex items-center gap-2 rounded-lg bg-brand-600 text-white px-5 py-3 hover:brightness-110 transition"
+            >
+              Upload your data
             </Link>
-            <button onClick={trySample} className="inline-flex items-center gap-2 rounded-lg border px-4 py-2 hover:bg-gray-50 dark:hover:bg-gray-800">
-              Use sample
+            <button
+              onClick={trySample}
+              disabled={loadingSample}
+              className="inline-flex items-center gap-2 rounded-lg border px-5 py-3 hover:bg-gray-50 dark:hover:bg-gray-800 transition"
+            >
+              {loadingSample ? "Analyzing sample…" : "Try a sample dataset"}
             </button>
           </div>
-        </div>
-      </section>
-    </div>
+          {error && <p className="mt-3 text-sm text-red-500">{error}</p>}
+        </section>
+
+        {/* Feature grid */}
+        <section>
+          <h2 className="text-xl font-semibold">Core features</h2>
+          <div className="mt-4 grid sm:grid-cols-2 lg:grid-cols-3 gap-5">
+            <FeatureCard icon={<IconBolt />} title="Automated EDA" desc="Data summary, missingness, dtypes, duplicates, and quick column stats." />
+            <FeatureCard icon={<IconChart />} title="Interactive charts" desc="Histograms, bar/pie, scatter, correlation heatmap, and time‑series." />
+            <FeatureCard icon={<IconSpark />} title="AI insights" desc="Plain‑English takeaways: strongest relationships, skew, dominant categories, trends." />
+            <FeatureCard icon={<IconSlider />} title="Filters" desc="Slice by categories to focus on what matters (client-side, fast)." />
+            <FeatureCard icon={<IconForecast />} title="Forecast" desc="Detects date + target and produces a trend+seasonality forecast with backtest metrics." />
+            <FeatureCard icon={<IconShield />} title="Privacy" desc="Data is processed server‑side and kept only in a short‑lived memory cache." />
+          </div>
+        </section>
+
+        {/* How it works */}
+        <section>
+          <h2 className="text-xl font-semibold">How it works</h2>
+          <ol className="mt-3 grid md:grid-cols-3 gap-4">
+            <Step n={1} title="Upload" desc="CSV/Excel is parsed with robust fallbacks (encoding/date formats)." />
+            <Step n={2} title="Analyze" desc="Automated EDA + insight generation + chart-ready series." />
+            <Step n={3} title="Forecast" desc="If there’s a date/time and numeric target, a quick forecast is provided." />
+          </ol>
+        </section>
+
+        {/* CTA */}
+        <section className="rounded-xl p-6 border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
+          <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+            <div>
+              <div className="text-lg font-semibold">Ready to explore your data?</div>
+              <div className="text-sm text-gray-600 dark:text-gray-400">Upload a file or use the sample and jump straight into charts and insights.</div>
+            </div>
+            <div className="flex gap-3">
+              <Link to="/upload" className="inline-flex items-center gap-2 rounded-lg bg-brand-600 text-white px-4 py-2 hover:brightness-110">
+                Upload now
+              </Link>
+              <button onClick={trySample} className="inline-flex items-center gap-2 rounded-lg border px-4 py-2 hover:bg-gray-50 dark:hover:bg-gray-800">
+                Use sample
+              </button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </>
   );
 }
 

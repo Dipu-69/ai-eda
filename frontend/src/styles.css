@@ -60,3 +60,14 @@ html, body {
   border: 2px solid transparent;
   background-clip: content-box;
 }
+
+/* Mobile table truncation */
+@media (max-width: 767px) {
+  .table-mobile th,
+  .table-mobile td {
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}

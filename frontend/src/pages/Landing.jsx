@@ -3,6 +3,7 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import { analyzeFile } from "../services/api";
 import HeroPreview from "../components/HeroPreview";
+import NavBar from "../components/NavBar";
 
 const API_DOCS = (import.meta.env.VITE_API_URL || "") + "/docs";
 const SAMPLE_URL = "https://raw.githubusercontent.com/mwaskom/seaborn-data/master/tips.csv";
@@ -30,6 +31,7 @@ export default function Landing() {
 
   return (
     <div>
+      <NavBar />
       {/* Hero */}
       <section className="relative overflow-hidden py-20 md:py-28">
         <div className="absolute inset-0 -z-10 bg-gradient-to-br from-brand-500/10 via-fuchsia-400/10 to-emerald-400/10" />

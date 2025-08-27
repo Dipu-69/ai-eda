@@ -72,7 +72,7 @@ export default function HeroPreview() {
   }, []);
 
   return (
-    <div className="rounded-2xl bg-white/70 dark:bg-gray-800/60 backdrop-blur border border-gray-200/70 dark:border-gray-700 p-5">
+    <div className="hidden md:block rounded-2xl bg-white/70 dark:bg-gray-800/60 backdrop-blur border border-gray-200/70 dark:border-gray-700 p-5 ">
       <div className="text-sm font-medium">Preview</div>
 
       {/* KPIs */}

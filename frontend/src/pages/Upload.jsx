@@ -2,6 +2,7 @@ import { useNavigate } from "react-router-dom";
 import { useState } from "react";
 import FileDropzone from "../components/FileDropzone";
 import { analyzeFile, LIMITS } from "../services/api";
+import NavBar from "../components/NavBar";
 
 export default function Upload() {
   const [loading, setLoading] = useState(false);
@@ -21,6 +22,8 @@ export default function Upload() {
   }
 
   return (
+    <div>
+      <NavBar/>
     <div className="mx-auto max-w-3xl px-6 py-12">
       <h2 className="text-2xl font-semibold mb-6">Upload a dataset</h2>
       <FileDropzone onFile={handleFile} />
@@ -29,6 +32,7 @@ export default function Upload() {
       </p>
       {loading && <p className="mt-4 text-sm">Analyzing…</p>}
       {error && <p className="mt-2 text-sm text-red-500">{error}</p>}
+    </div>
     </div>
   );
 }
